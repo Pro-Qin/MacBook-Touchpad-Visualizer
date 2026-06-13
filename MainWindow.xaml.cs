@@ -138,6 +138,54 @@ internal static class RawInput
     [DllImport("hid.dll")]
     public static extern int HidP_GetCaps(IntPtr PreparsedData, out HIDP_CAPS Caps);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateFile(string lpFileName, uint dwDesiredAccess,
+        uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+        uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    public const uint GENERIC_READ = 0x80000000;
+    public const uint GENERIC_WRITE = 0x40000000;
+    public const uint FILE_SHARE_READ = 1;
+    public const uint FILE_SHARE_WRITE = 2;
+    public const uint OPEN_EXISTING = 3;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    // ===== WM_TOUCH API =====
+    [DllImport("user32.dll")]
+    public static extern bool RegisterTouchWindow(IntPtr hwnd, uint ulFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetTouchInputInfo(IntPtr hTouchInput, uint cInputs,
+        [Out] TOUCHINPUT[] pInputs, int cbSize);
+
+    [DllImport("user32.dll")]
+    public static extern bool CloseTouchInputHandle(IntPtr hTouchInput);
+
+    public const int WM_TOUCH = 0x0240;
+    public const uint TOUCHEVENTF_DOWN = 0x0001;
+    public const uint TOUCHEVENTF_MOVE = 0x0002;
+    public const uint TOUCHEVENTF_UP = 0x0004;
+    public const uint TOUCHEVENTF_INRANGE = 0x0008;
+    public const uint TOUCHEVENTF_PRIMARY = 0x0010;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TOUCHINPUT
+    {
+        public int x;
+        public int y;
+        public IntPtr hSource;
+        public int dwID;
+        public uint dwFlags;
+        public uint dwMask;
+        public uint dwTime;
+        public IntPtr dwExtraInfo;
+        public uint cxContact;
+        public uint cyContact;
+    }
+
     public const uint HidP_Input = 0;
     public const uint HidP_Output = 1;
     public const uint HidP_Feature = 2;
@@ -188,54 +236,62 @@ internal static class RawInput
     /// <summary>
     /// 读取 HID 设备报告描述符并返回可读字符串
     /// </summary>
-    public static string DumpHidReportDescriptor(IntPtr hDevice)
+    public static string DumpHidReportDescriptor(string devicePath)
     {
         var sb = new System.Text.StringBuilder();
-        if (!HidD_GetPreparsedData(hDevice, out IntPtr preparsed))
+
+        // 用 CreateFile 打开 HID 设备
+        IntPtr hDevice = CreateFile(devicePath, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
+            OPEN_EXISTING, 0, IntPtr.Zero);
+
+        if (hDevice == new IntPtr(-1))
         {
-            sb.AppendLine($"HidD_GetPreparsedData 失败, error={Marshal.GetLastWin32Error()}");
+            sb.AppendLine($"CreateFile 失败, error={Marshal.GetLastWin32Error()}");
             return sb.ToString();
         }
 
         try
         {
-            // 获取 Caps (报告长度等)
-            if (HidP_GetCaps(preparsed, out var caps) >= 0)
+            if (!HidD_GetPreparsedData(hDevice, out IntPtr preparsed))
             {
-                sb.AppendLine($"HID Caps: 输入报告={caps.InputReportByteLength}B");
-                sb.AppendLine($"  UsagePage=0x{caps.UsagePage:X2} Usage=0x{caps.Usage:X2}");
+                sb.AppendLine($"HidD_GetPreparsedData 失败, error={Marshal.GetLastWin32Error()}");
+                return sb.ToString();
             }
 
-            // 获取 Value Caps (每个字段的描述)
-            uint capsLen = 0;
-            int result = HidP_GetValueCaps(HidP_Input, IntPtr.Zero, ref capsLen, preparsed);
-            if (capsLen > 0)
+            try
             {
-                int capsSize = Marshal.SizeOf<HIDP_VALUE_CAPS>();
-                IntPtr pCaps = Marshal.AllocHGlobal((int)(capsLen * capsSize));
-                try
+                if (HidP_GetCaps(preparsed, out var caps) >= 0)
+                    sb.AppendLine($"HID Caps: 输入报告={caps.InputReportByteLength}B");
+
+                uint capsLen = 0;
+                HidP_GetValueCaps(HidP_Input, IntPtr.Zero, ref capsLen, preparsed);
+                if (capsLen > 0)
                 {
-                    result = HidP_GetValueCaps(HidP_Input, pCaps, ref capsLen, preparsed);
-                    for (uint i = 0; i < capsLen; i++)
+                    int capsSize = Marshal.SizeOf<HIDP_VALUE_CAPS>();
+                    IntPtr pCaps = Marshal.AllocHGlobal((int)(capsLen * capsSize));
+                    try
                     {
-                        var vc = Marshal.PtrToStructure<HIDP_VALUE_CAPS>(
-                            IntPtr.Add(pCaps, (int)(i * capsSize)));
-                        sb.AppendLine($"  [{i}] Page=0x{vc.UsagePage:X2}" +
-                            $" 位宽={vc.BitSize}bit 数量={vc.ReportCount}" +
-                            $" 范围=[{vc.LogicalMin},{vc.LogicalMax}]" +
-                            $" ReportID={vc.ReportID}");
+                        HidP_GetValueCaps(HidP_Input, pCaps, ref capsLen, preparsed);
+                        for (uint i = 0; i < capsLen; i++)
+                        {
+                            var vc = Marshal.PtrToStructure<HIDP_VALUE_CAPS>(
+                                IntPtr.Add(pCaps, (int)(i * capsSize)));
+                            sb.AppendLine($"  [{i}] Page=0x{vc.UsagePage:X2}" +
+                                $" 位宽={vc.BitSize}bit 数量={vc.ReportCount}" +
+                                $" 范围=[{vc.LogicalMin},{vc.LogicalMax}]" +
+                                $" ReportID={vc.ReportID}");
+                        }
                     }
+                    finally { Marshal.FreeHGlobal(pCaps); }
                 }
-                finally { Marshal.FreeHGlobal(pCaps); }
             }
-            else
-            {
-                sb.AppendLine("无 Value Caps 或获取失败");
-            }
+            finally { HidD_FreePreparsedData(preparsed); }
         }
         finally
         {
-            HidD_FreePreparsedData(preparsed);
+            if (hDevice != IntPtr.Zero && hDevice != new IntPtr(-1))
+                CloseHandle(hDevice);
         }
 
         return sb.ToString();
@@ -797,6 +853,10 @@ public partial class MainWindow : Window
         // 3.5) 读取触控板 HID 报告描述符（确认数据格式）
         DumpTouchpadHidDescriptor(hwnd);
 
+        // 3.6) 注册 WM_TOUCH (Bootcamp.exe 也用这个)
+        RawInput.RegisterTouchWindow(hwnd, 0);
+        DebugLog("📋 WM_TOUCH 已注册");
+
         // 窗口大小变化时重算画布原点
         SizeChanged += (_, _) => UpdateCanvasOrigin();
         UpdateCanvasOrigin();
@@ -827,6 +887,10 @@ public partial class MainWindow : Window
         {
             case RawInput.WM_INPUT:
                 HandleRawInput(lParam);
+                break;
+
+            case RawInput.WM_TOUCH:
+                HandleWmTouch(wParam, lParam);
                 break;
 
             case 0x0245: // WM_POINTERUPDATE
@@ -1165,6 +1229,87 @@ public partial class MainWindow : Window
     }
 
     // ========================================================================
+    // WM_TOUCH 消息处理
+    // ========================================================================
+    private void HandleWmTouch(IntPtr wParam, IntPtr lParam)
+    {
+        int touchCount = (int)wParam;
+        if (touchCount <= 0) return;
+
+        var inputs = new RawInput.TOUCHINPUT[touchCount];
+        if (!RawInput.GetTouchInputInfo(lParam, (uint)touchCount, inputs,
+                Marshal.SizeOf<RawInput.TOUCHINPUT>()))
+            return;
+
+        try
+        {
+            _touchpadFrames++;
+            double winW = Math.Max(TouchCanvas.ActualWidth, 100);
+            double winH = Math.Max(ActualHeight, 100);
+            var activeIds = new HashSet<int>();
+
+            foreach (var ti in inputs)
+            {
+                if ((ti.dwFlags & RawInput.TOUCHEVENTF_UP) != 0) continue;
+
+                // WM_TOUCH 坐标是屏幕坐标 (以百分之一毫米为单位!)
+                // 需要转换为像素: screenX = ti.x / 100 * dpi / 2540
+                var screenPt = new System.Windows.Point(ti.x / 100.0, ti.y / 100.0);
+                var windowPt = PointFromScreen(screenPt);
+
+                int id = ti.dwID % 100 + 1;
+                activeIds.Add(id);
+
+                double cx = Math.Max(ti.cxContact / 100.0, 0);
+                double cy = Math.Max(ti.cyContact / 100.0, 0);
+
+                if (_active.TryGetValue(id, out var state))
+                {
+                    state.Position = windowPt;
+                    state.ContactWidth = cx;
+                    state.ContactHeight = cy;
+                    state.Source = "WM_TOUCH";
+                    state.Visible = true;
+                }
+                else
+                {
+                    _active[id] = new TouchState
+                    {
+                        DeviceId = id, Position = windowPt,
+                        ContactWidth = cx, ContactHeight = cy,
+                        Pressure = 0.5, ColorIndex = _active.Count % Palette.Length,
+                        Source = "WM_TOUCH", Visible = true, StableCount = 10,
+                    };
+                }
+            }
+
+            var dead = _active.Keys.Where(k => !activeIds.Contains(k) && _active[k].Source == "WM_TOUCH").ToList();
+            foreach (var id in dead)
+            {
+                _active.Remove(id);
+                if (_visuals.TryGetValue(id, out var vis))
+                {
+                    TouchCanvas.Children.Remove(vis);
+                    _visuals.Remove(id);
+                }
+            }
+
+            if (activeIds.Count > 0 && activeIds.Count != _lastContactCount)
+            {
+                DebugLog($"🖐 WM_TOUCH #{_touchpadFrames}: {activeIds.Count} 触点");
+                _lastContactCount = activeIds.Count;
+            }
+
+            RenderTouches();
+            UpdateInfoPanel();
+        }
+        finally
+        {
+            RawInput.CloseTouchInputHandle(lParam);
+        }
+    }
+
+    // ========================================================================
     // 鼠标滚轮（2 指滚动）
     // ========================================================================
     private void HandleMouseWheel(IntPtr wParam, IntPtr lParam)
@@ -1242,7 +1387,7 @@ public partial class MainWindow : Window
                             name.Contains("Col01"))
                         {
                             DebugLog("📋 正在读取触控板 HID 报告描述符...");
-                            string dump = RawInput.DumpHidReportDescriptor(entry.hDevice);
+                            string dump = RawInput.DumpHidReportDescriptor(name);
                             foreach (var line in dump.Split('\n'))
                                 DebugLog("  " + line.TrimEnd());
                             return;
