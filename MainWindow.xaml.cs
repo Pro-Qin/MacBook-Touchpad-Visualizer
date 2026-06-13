@@ -566,6 +566,7 @@ public partial class MainWindow : Window
     private const int MAX_LOG = 30;
     private long _msgCount;
     private long _touchpadFrames;
+    private DateTime _lastTouchTime = DateTime.MinValue;
 
     // 渲染帧率控制 — 已移除帧率限制，全速渲染
     private Point _canvasOrigin;
@@ -573,6 +574,7 @@ public partial class MainWindow : Window
     // 调试冻结
     private bool _frozen;
     private string _frozenLog = "";
+    private bool _showAllFingers;
 
     // 信息面板增量更新
     private int _lastInfoCount = -1;
@@ -698,8 +700,20 @@ public partial class MainWindow : Window
 
             _lastContactCount = contacts.Count;
 
+            // 更新最后触摸时间戳
+            if (contacts.Count > 0)
+                _lastTouchTime = DateTime.UtcNow;
+
             // 直接渲染，不做帧率限制（降低延迟优先于省电）
             ProcessContactsAndRender(contacts);
+
+            // 超时清理：如果超过 150ms 没有收到触控数据，强制清除
+            if (_lastTouchTime != DateTime.MinValue &&
+                (DateTime.UtcNow - _lastTouchTime).TotalMilliseconds > 150)
+            {
+                if (_active.Values.Any(s => s.Visible))
+                    ClearTouchState();
+            }
         }
         finally
         {
@@ -712,6 +726,9 @@ public partial class MainWindow : Window
     // ========================================================================
     private void ProcessContactsAndRender(List<TouchpadContact> contacts)
     {
+        // 单指模式：只保留第一个触点
+        if (!_showAllFingers && contacts.Count > 1)
+            contacts = contacts.Take(1).ToList();
         // 获取窗口尺寸
         double winW = Math.Max(TouchCanvas.ActualWidth, 100);  // 画布的实际宽度
         double winH = Math.Max(ActualHeight, 100);
@@ -1096,6 +1113,19 @@ public partial class MainWindow : Window
                 DebugLog("💡 提示: 请以管理员身份运行此程序");
             }
         }
+    }
+
+    // ========================================================================
+    // 多指模式切换
+    // ========================================================================
+    private void MultiFingerBtn_Click(object sender, RoutedEventArgs e)
+    {
+        _showAllFingers = !_showAllFingers;
+        MultiFingerBtn.Content = _showAllFingers ? "👆 多指" : "👆 单指";
+        MultiFingerBtn.Foreground = _showAllFingers
+            ? new SolidColorBrush(Color.FromRgb(88, 166, 255))
+            : new SolidColorBrush(Color.FromRgb(139, 148, 158));
+        DebugLog(_showAllFingers ? "👆 多指模式：显示所有触点" : "👆 单指模式：仅显示第一个触点");
     }
 
     // ========================================================================

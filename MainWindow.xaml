@@ -92,6 +92,13 @@
                                 Foreground="#c9d1d9" BorderThickness="1"
                                 BorderBrush="#30363d" Cursor="Hand"
                                 Click="TouchpadToggleBtn_Click"/>
+                        <Button x:Name="MultiFingerBtn" Content="👆 单指"
+                                FontSize="9" Height="20" Padding="5,0"
+                                Margin="4,0,0,0" Background="#21262d"
+                                Foreground="#8b949e" BorderThickness="1"
+                                BorderBrush="#30363d" Cursor="Hand"
+                                Click="MultiFingerBtn_Click"
+                                ToolTip="显示所有检测到的触点"/>
                     </StackPanel>
                     <Border Background="#0d1117" BorderBrush="#30363d"
                             BorderThickness="1" CornerRadius="5" Padding="8,6"
