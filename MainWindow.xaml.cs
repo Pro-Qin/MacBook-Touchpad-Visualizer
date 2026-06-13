@@ -299,8 +299,9 @@ internal class TouchpadHidParser
     public enum ParseMode
     {
         Mode8B,      // 每指 8 字节: X+Y+W+H+P+F
-        Mode4B,      // 每指 4 字节: X+Y (跳过 W/H/P/F)
-        Mode8Plus4,  // 指1=8B, 指2~5=每指 4B
+        Mode4B,      // 每指 4 字节: X+Y
+        Mode8Plus4,  // 指1=8B, 指2~5=4B
+        ModeWX,      // 每指 8 字节: W+X+Y+H+P+F（Width 在前）
     }
 
     public const int DATA_START = 6;        // 数据起始偏移
@@ -365,20 +366,34 @@ internal class TouchpadHidParser
 
             if (off + size > rawData.Length) break;
 
-            int x = rawData[off] | (rawData[off + 1] << 8);
-            int y = size >= 4 ? (rawData[off + 2] | (rawData[off + 3] << 8)) : 0;
+            int x, y, w = 0, h = 0, p = 0, flags = 0;
+
+            if (mode == ParseMode.ModeWX && size >= 8)
+            {
+                // W+X+Y+H+P+F 顺序
+                w = rawData[off];
+                x = rawData[off + 1] | (rawData[off + 2] << 8);
+                y = rawData[off + 3] | (rawData[off + 4] << 8);
+                h = rawData[off + 5];
+                p = rawData[off + 6];
+                flags = rawData[off + 7];
+            }
+            else
+            {
+                // 标准 X+Y+W+H+P+F 顺序
+                x = rawData[off] | (rawData[off + 1] << 8);
+                y = size >= 4 ? (rawData[off + 2] | (rawData[off + 3] << 8)) : 0;
+                if (size >= 5) w = rawData[off + 4];
+                if (size >= 6) h = rawData[off + 5];
+                if (size >= 7) p = rawData[off + 6];
+                if (size >= 8) flags = rawData[off + 7];
+            }
 
             if (!showAll)
             {
                 if (x < 100 || y < 100) continue;
                 if (x > maxX * 1.15 || y > maxY * 1.15) continue;
             }
-
-            int w = 0, h = 0, p = 0, flags = 0;
-            if (size >= 5) w = rawData[off + 4];
-            if (size >= 6) h = rawData[off + 5];
-            if (size >= 7) p = rawData[off + 6];
-            if (size >= 8) flags = rawData[off + 7];
 
             contacts.Add(new TouchpadContact
             {
@@ -1290,6 +1305,7 @@ public partial class MainWindow : Window
         {
             TouchpadHidParser.ParseMode.Mode8B => TouchpadHidParser.ParseMode.Mode4B,
             TouchpadHidParser.ParseMode.Mode4B => TouchpadHidParser.ParseMode.Mode8Plus4,
+            TouchpadHidParser.ParseMode.Mode8Plus4 => TouchpadHidParser.ParseMode.ModeWX,
             _ => TouchpadHidParser.ParseMode.Mode8B,
         };
 
@@ -1297,7 +1313,8 @@ public partial class MainWindow : Window
         {
             TouchpadHidParser.ParseMode.Mode8B => "8B",
             TouchpadHidParser.ParseMode.Mode4B => "4B",
-            _ => "8+4",
+            TouchpadHidParser.ParseMode.Mode8Plus4 => "8+4",
+            _ => "WX",
         };
 
         ModeBtn.Content = label;
