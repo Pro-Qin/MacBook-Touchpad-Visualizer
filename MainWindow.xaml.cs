@@ -295,31 +295,23 @@ internal static class RawInput
 
 internal class TouchpadHidParser
 {
-    // Apple MacBook Air 2017 (VID_05AC) Precision Touchpad HID 报告
-    // 完整报告 50 字节，每指 8 字节，从字节 6 开始
-    //
-    //  Byte 0:    ReportID (0x05)
-    //  Byte 1:    Status (bit0=tip)
-    //  Bytes 2-5: 未知/时间戳
-    //  Bytes 6+ : 触点数据，每指 8 字节:
-    //    +0: X (LE, 16-bit)
-    //    +2: Y (LE, 16-bit)
-    //    +4: Width
-    //    +5: Height
-    //    +6: Pressure
-    //    +7: Flags
+    // 解析模式
+    public enum ParseMode
+    {
+        Mode8B,      // 每指 8 字节: X+Y+W+H+P+F
+        Mode4B,      // 每指 4 字节: X+Y (跳过 W/H/P/F)
+        Mode8Plus4,  // 指1=8B, 指2~5=每指 4B
+    }
 
-    public const int FINGER_SIZE = 8;       // 每指数据块大小
     public const int DATA_START = 6;        // 数据起始偏移
-    public const int MAX_FINGERS = 5;       // 最多 5 指
 
     public static List<TouchpadContact> Parse(byte[] rawData, int maxX, int maxY,
-        out string debugInfo, bool showAll = false)
+        out string debugInfo, bool showAll = false, ParseMode mode = ParseMode.Mode8B)
     {
         var contacts = new List<TouchpadContact>();
         var dbg = new System.Text.StringBuilder();
 
-        if (rawData == null || rawData.Length < DATA_START + FINGER_SIZE)
+        if (rawData == null || rawData.Length < DATA_START + 4)
         {
             debugInfo = $"数据不足: {rawData?.Length ?? 0}B";
             return contacts;
@@ -342,34 +334,56 @@ internal class TouchpadHidParser
             // showAll 模式：即使无触控也显示槽位数据
         }
 
-        for (int f = 0; f < MAX_FINGERS; f++)
+        // 根据模式决定每指大小和最大指数
+        int fingerSize = mode switch
         {
-            int off = DATA_START + f * FINGER_SIZE;
-            if (off + FINGER_SIZE > rawData.Length) break;
+            ParseMode.Mode4B => 4,
+            ParseMode.Mode8Plus4 => 8,  // 指1单独处理
+            _ => 8,
+        };
+        int maxFingers = mode switch
+        {
+            ParseMode.Mode4B => 10,
+            ParseMode.Mode8Plus4 => 5,
+            _ => 5,
+        };
 
-            int x = rawData[off]     | (rawData[off + 1] << 8);
-            int y = rawData[off + 2] | (rawData[off + 3] << 8);
+        for (int f = 0; f < maxFingers; f++)
+        {
+            int off;
+            int size = fingerSize;
+
+            if (mode == ParseMode.Mode8Plus4)
+            {
+                // 指1=8B, 指2~5=4B
+                size = (f == 0) ? 8 : 4;
+            }
+
+            off = DATA_START + (mode == ParseMode.Mode8Plus4 && f > 0
+                ? 8 + (f - 1) * 4   // 指2+从 byte 14 开始
+                : f * size);
+
+            if (off + size > rawData.Length) break;
+
+            int x = rawData[off] | (rawData[off + 1] << 8);
+            int y = size >= 4 ? (rawData[off + 2] | (rawData[off + 3] << 8)) : 0;
 
             if (!showAll)
             {
-                // 正常模式：过滤无效触点
                 if (x < 100 || y < 100) continue;
                 if (x > maxX * 1.15 || y > maxY * 1.15) continue;
             }
 
-            int w = rawData[off + 4];
-            int h = rawData[off + 5];
-            int p = rawData[off + 6];
-            int flags = rawData[off + 7];
+            int w = 0, h = 0, p = 0, flags = 0;
+            if (size >= 5) w = rawData[off + 4];
+            if (size >= 6) h = rawData[off + 5];
+            if (size >= 7) p = rawData[off + 6];
+            if (size >= 8) flags = rawData[off + 7];
 
-            // 全部添加，showAll 模式下显示所有 5 个槽位
             contacts.Add(new TouchpadContact
             {
-                X = x, Y = y,
-                Width = w, Height = h,
-                Pressure = p,
-                Confidence = (flags & 0x01) != 0,
-                ContactId = f,
+                X = x, Y = y, Width = w, Height = h,
+                Pressure = p, Confidence = (flags & 0x01) != 0, ContactId = f,
             });
 
             dbg.Append($" F{f}:({x},{y}) W={w} H={h} P={p}");
@@ -582,6 +596,7 @@ public partial class MainWindow : Window
     private bool _frozen;
     private string _frozenLog = "";
     private bool _showAllFingers;
+    private TouchpadHidParser.ParseMode _parseMode = TouchpadHidParser.ParseMode.Mode8B;
 
     // 信息面板增量更新
     private int _lastInfoCount = -1;
@@ -697,7 +712,7 @@ public partial class MainWindow : Window
             _frameCounter++;
 
             // 解析触点
-            var contacts = TouchpadHidParser.Parse(hidReport, TOUCHPAD_MAX_X, TOUCHPAD_MAX_Y, out string debug, _showAllFingers);
+            var contacts = TouchpadHidParser.Parse(hidReport, TOUCHPAD_MAX_X, TOUCHPAD_MAX_Y, out string debug, _showAllFingers, _parseMode);
 
             // 每 50 帧记录一次摘要 + 触点数量变化时记录
             if (_frameCounter % 50 == 0)
@@ -907,6 +922,12 @@ public partial class MainWindow : Window
                     el.Height = displaySize;
                     el.Opacity = alpha;
                 }
+                else if (grid.Children[0] is Rectangle rect)
+                {
+                    rect.Width = displaySize;
+                    rect.Height = displaySize;
+                    rect.Opacity = alpha;
+                }
                 Canvas.SetLeft(grid, cx - displaySize / 2);
                 Canvas.SetTop(grid, cy - displaySize / 2);
             }
@@ -916,15 +937,33 @@ public partial class MainWindow : Window
                 var fill = new SolidColorBrush(color);
                 var stroke = new SolidColorBrush(Color.FromArgb(160, 255, 255, 255));
 
-                var ellipse = new Ellipse
+                // 槽位模式 #2~#4 用矩形，其余用圆形
+                bool useRect = _showAllFingers && kvp.Key >= 2 && kvp.Key <= 4;
+                Shape shape;
+                if (useRect)
                 {
-                    Width = displaySize,
-                    Height = displaySize,
-                    Fill = fill,
-                    Opacity = alpha,
-                    Stroke = stroke,
-                    StrokeThickness = 2,
-                };
+                    shape = new Rectangle
+                    {
+                        Width = displaySize,
+                        Height = displaySize,
+                        Fill = fill,
+                        Opacity = alpha,
+                        Stroke = stroke,
+                        StrokeThickness = 1.5,
+                    };
+                }
+                else
+                {
+                    shape = new Ellipse
+                    {
+                        Width = displaySize,
+                        Height = displaySize,
+                        Fill = fill,
+                        Opacity = alpha,
+                        Stroke = stroke,
+                        StrokeThickness = 2,
+                    };
+                }
 
                 var label = new TextBlock
                 {
@@ -943,7 +982,7 @@ public partial class MainWindow : Window
                     Height = displaySize,
                     IsHitTestVisible = false,
                 };
-                container.Children.Add(ellipse);
+                container.Children.Add(shape);
                 container.Children.Add(label);
 
                 TouchCanvas.Children.Add(container);
@@ -1150,8 +1189,32 @@ public partial class MainWindow : Window
             : new SolidColorBrush(Color.FromRgb(139, 148, 158));
         ClearTouchState();
         DebugLog(_showAllFingers
-            ? "🔍 槽位模式：显示全部 5 个 HID 原始槽位"
+            ? "🔍 槽位模式：显示全部 HID 原始槽位"
             : "🔍 正常模式：过滤无效触点 + 去抖");
+    }
+
+    // ========================================================================
+    // 解析模式循环切换
+    // ========================================================================
+    private void ModeBtn_Click(object sender, RoutedEventArgs e)
+    {
+        _parseMode = _parseMode switch
+        {
+            TouchpadHidParser.ParseMode.Mode8B => TouchpadHidParser.ParseMode.Mode4B,
+            TouchpadHidParser.ParseMode.Mode4B => TouchpadHidParser.ParseMode.Mode8Plus4,
+            _ => TouchpadHidParser.ParseMode.Mode8B,
+        };
+
+        string label = _parseMode switch
+        {
+            TouchpadHidParser.ParseMode.Mode8B => "8B",
+            TouchpadHidParser.ParseMode.Mode4B => "4B",
+            _ => "8+4",
+        };
+
+        ModeBtn.Content = label;
+        ClearTouchState();
+        DebugLog($"📐 解析模式切换为: {label}");
     }
 
     // ========================================================================
