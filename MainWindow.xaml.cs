@@ -243,12 +243,24 @@ internal static class RawInput
         // 用 CreateFile 打开 HID 设备
         IntPtr hDevice = CreateFile(devicePath, GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
-            OPEN_EXISTING, 0, IntPtr.Zero);
+            OPEN_EXISTING, 0x80 /* FILE_ATTRIBUTE_NORMAL */, IntPtr.Zero);
 
         if (hDevice == new IntPtr(-1))
         {
-            sb.AppendLine($"CreateFile 失败, error={Marshal.GetLastWin32Error()}");
-            return sb.ToString();
+            uint err = GetLastError();
+            sb.AppendLine($"CreateFile 失败, error={err} (0x{err:X8})");
+            // 尝试备选路径格式
+            string altPath = devicePath.Replace("\\\\?\\", "\\\\.\\");
+            if (altPath != devicePath)
+            {
+                hDevice = CreateFile(altPath, GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
+                    OPEN_EXISTING, 0x80, IntPtr.Zero);
+                if (hDevice != new IntPtr(-1))
+                    sb.AppendLine("  用备选路径成功");
+            }
+            if (hDevice == new IntPtr(-1))
+                return sb.ToString();
         }
 
         try
