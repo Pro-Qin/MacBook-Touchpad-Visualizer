@@ -535,6 +535,8 @@ internal class TouchState
     public double Pressure;
     public int ColorIndex;
     public string Source = "";
+    public int StableCount;   // 稳定性计数器
+    public bool Visible;      // 通过稳定性检测后才显示
 }
 
 // ========================================================================
@@ -578,8 +580,8 @@ public partial class MainWindow : Window
 
     // 触控板设备坐标 → 窗口坐标的映射
     // 触控板通常在 0..MAX 范围内报告绝对坐标
-    private const int TOUCHPAD_MAX_X = 9600;
-    private const int TOUCHPAD_MAX_Y = 9400;
+    private const int TOUCHPAD_MAX_X = 10000;
+    private const int TOUCHPAD_MAX_Y = 7000;
 
     public MainWindow()
     {
@@ -759,15 +761,37 @@ public partial class MainWindow : Window
             }
         }
 
-        // 清理离开的触点
-        var dead = _active.Keys.Where(k => !activeIds.Contains(k)).ToList();
-        foreach (var id in dead)
+        // 稳定性去抖参数
+        const int SHOW_THRESHOLD = 3;  // 连续出现 3 帧后显示
+        const int HIDE_THRESHOLD = -5; // 连续消失 5 帧后移除
+
+        // 更新现有触点的稳定计数器，标记本次出现的触点
+        foreach (var id in _active.Keys.ToList())
         {
-            _active.Remove(id);
-            if (_visuals.TryGetValue(id, out var vis))
+            if (activeIds.Contains(id))
             {
-                TouchCanvas.Children.Remove(vis);
-                _visuals.Remove(id);
+                // 触点本次出现 → 计数器递增（上限）
+                var state = _active[id];
+                if (state.StableCount < SHOW_THRESHOLD + 2)
+                    state.StableCount++;
+                if (state.StableCount >= SHOW_THRESHOLD)
+                    state.Visible = true;
+            }
+            else
+            {
+                // 触点本次未出现 → 计数器递减
+                var state = _active[id];
+                state.StableCount--;
+                if (state.StableCount <= HIDE_THRESHOLD)
+                {
+                    // 稳定消失 → 移除
+                    _active.Remove(id);
+                    if (_visuals.TryGetValue(id, out var vis))
+                    {
+                        TouchCanvas.Children.Remove(vis);
+                        _visuals.Remove(id);
+                    }
+                }
             }
         }
 
@@ -818,12 +842,14 @@ public partial class MainWindow : Window
     // ========================================================================
     private void RenderTouches()
     {
-        HintText.Visibility = _active.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        int visibleCount = _active.Values.Count(s => s.Visible);
+        HintText.Visibility = visibleCount == 0 ? Visibility.Visible : Visibility.Collapsed;
         Point origin = _canvasOrigin;
 
         foreach (var kvp in _active)
         {
             var s = kvp.Value;
+            if (!s.Visible) continue;
             double cx = s.Position.X - origin.X;
             double cy = s.Position.Y - origin.Y;
 
@@ -894,10 +920,11 @@ public partial class MainWindow : Window
     // ========================================================================
     private void UpdateInfoPanel()
     {
-        TouchCount.Text = $"触点数量：{_active.Count}";
+        int visibleCount = _active.Values.Count(s => s.Visible);
+        TouchCount.Text = $"触点数量：{visibleCount}";
         _debugCounter.Text = $"📨 WM消息: {_msgCount}  |  🖐 触控帧: {_touchpadFrames}";
 
-        int count = _active.Count;
+        int count = visibleCount;
         _infoFrameSkip++;
 
         // 触点数量变化 或 每 10 帧重建一次列表（更新坐标数值）
@@ -909,6 +936,7 @@ public partial class MainWindow : Window
             foreach (var kvp in _active.OrderBy(k => k.Key))
             {
                 var s = kvp.Value;
+                if (!s.Visible) continue;
                 var c = Palette[s.ColorIndex % Palette.Length];
                 _infoItems.Add(new TouchPointInfoVM
                 {
