@@ -619,6 +619,9 @@ public partial class MainWindow : Window
         var src = HwndSource.FromHwnd(hwnd);
         src?.AddHook(WndProc);
 
+        // 0) 开启 WPF 触控帧接收 (EnablePointerSupport 已启用)
+        Touch.FrameReported += OnWpfTouchFrame;
+
         // 1) 枚举所有 Raw Input 设备
         DebugLog("🔍 正在扫描系统中的 Raw Input 设备...");
         var devices = RawInput.EnumerateDevices();
@@ -671,6 +674,91 @@ public partial class MainWindow : Window
         }
 
         return IntPtr.Zero;
+    }
+
+    // ========================================================================
+    // WPF Touch.FrameReported（配合 EnablePointerSupport 开关）
+    // ========================================================================
+    private void OnWpfTouchFrame(object? sender, TouchFrameEventArgs e)
+    {
+        var points = e.GetTouchPoints(this);
+        if (points == null || points.Count == 0) return;
+
+        _touchpadFrames++;
+
+        // 获取画布原点
+        Point origin = TouchCanvas.TranslatePoint(new Point(0, 0), this);
+        double winW = Math.Max(TouchCanvas.ActualWidth, 100);
+        double winH = Math.Max(ActualHeight, 100);
+
+        var activeIds = new HashSet<int>();
+        int count = 0;
+
+        foreach (var tp in points)
+        {
+            if (tp.Action == TouchAction.Up) continue;
+            count++;
+            int id = tp.TouchDevice.Id % 10 + 1; // 确保在 1-10 范围
+
+            // WPF 坐标已相对于窗口
+            double wx = tp.Position.X - origin.X;
+            double wy = tp.Position.Y - origin.Y;
+            wx = Math.Clamp(wx, 0, winW);
+            wy = Math.Clamp(wy, 0, winH);
+
+            activeIds.Add(id);
+
+            if (_active.TryGetValue(id, out var state))
+            {
+                state.Position = new Point(wx, wy);
+                state.RawX = (int)tp.Position.X;
+                state.RawY = (int)tp.Position.Y;
+                state.ContactWidth = tp.Size.Width * 20;
+                state.ContactHeight = tp.Size.Height * 20;
+                state.Pressure = 0.5;
+                state.Source = "WPF-Touch";
+                state.Visible = true;
+                state.StableCount = 10;
+            }
+            else
+            {
+                _active[id] = new TouchState
+                {
+                    DeviceId = id,
+                    Position = new Point(wx, wy),
+                    RawX = (int)tp.Position.X,
+                    RawY = (int)tp.Position.Y,
+                    ContactWidth = tp.Size.Width * 20,
+                    ContactHeight = tp.Size.Height * 20,
+                    Pressure = 0.5,
+                    ColorIndex = _active.Count % Palette.Length,
+                    Source = "WPF-Touch",
+                    Visible = true,
+                    StableCount = 10,
+                };
+            }
+        }
+
+        // 清理离开的触点
+        var dead = _active.Keys.Where(k => !activeIds.Contains(k) && _active[k].Source == "WPF-Touch").ToList();
+        foreach (var id in dead)
+        {
+            _active.Remove(id);
+            if (_visuals.TryGetValue(id, out var vis))
+            {
+                TouchCanvas.Children.Remove(vis);
+                _visuals.Remove(id);
+            }
+        }
+
+        if (count > 0 && count != _lastContactCount)
+        {
+            DebugLog($"🖐 WPF触控 #{_touchpadFrames}: {count} 触点");
+            _lastContactCount = count;
+        }
+
+        RenderTouches();
+        UpdateInfoPanel();
     }
 
     // ========================================================================
