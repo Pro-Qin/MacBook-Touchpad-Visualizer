@@ -295,24 +295,31 @@ internal static class RawInput
 
 internal class TouchpadHidParser
 {
-    // Apple MacBook Air 2017 触控板 (VID_05AC) HID 报告解析
-    // 实测格式 (18 字节):
-    //  Byte 0: ReportID (0x05)
-    //  Byte 1: Status 标志位 (bit0=tip)
-    //  Bytes 2-5: 未知/填充
-    //  Bytes 6-7:  触点1 X (LE, 16-bit)
-    //  Bytes 8-9:  触点1 Y (LE, 16-bit)
-    //  Bytes 10-13: 触点1 扩展 (宽度+高度+压力+标志)
-    //  Bytes 14-15: 触点2 X (LE, 16-bit)
-    //  Bytes 16-17: 触点2 Y (LE, 16-bit)
-    //  最多 2 指/帧
+    // Apple MacBook Air 2017 (VID_05AC) Precision Touchpad HID 报告
+    // 完整报告 50 字节，每指 8 字节，从字节 6 开始
+    //
+    //  Byte 0:    ReportID (0x05)
+    //  Byte 1:    Status (bit0=tip)
+    //  Bytes 2-5: 未知/时间戳
+    //  Bytes 6+ : 触点数据，每指 8 字节:
+    //    +0: X (LE, 16-bit)
+    //    +2: Y (LE, 16-bit)
+    //    +4: Width
+    //    +5: Height
+    //    +6: Pressure
+    //    +7: Flags
 
-    public static List<TouchpadContact> Parse(byte[] rawData, int maxX, int maxY, out string debugInfo)
+    public const int FINGER_SIZE = 8;       // 每指数据块大小
+    public const int DATA_START = 6;        // 数据起始偏移
+    public const int MAX_FINGERS = 5;       // 最多 5 指
+
+    public static List<TouchpadContact> Parse(byte[] rawData, int maxX, int maxY,
+        out string debugInfo, bool showAll = false)
     {
         var contacts = new List<TouchpadContact>();
         var dbg = new System.Text.StringBuilder();
 
-        if (rawData == null || rawData.Length < 10)
+        if (rawData == null || rawData.Length < DATA_START + FINGER_SIZE)
         {
             debugInfo = $"数据不足: {rawData?.Length ?? 0}B";
             return contacts;
@@ -324,48 +331,46 @@ internal class TouchpadHidParser
 
         dbg.Append($"RID=0x{reportId:X2} Status=0x{status:X2}");
 
-        if (!tip)
+        if (!tip && !showAll)
         {
-            dbg.Append(" [未触摸]");
+            dbg.Append(" [无触控]");
             debugInfo = dbg.ToString();
             return contacts;
         }
 
-        // --- 触点1: bytes 6-9 (X+Y)，后面字节 10-13 是宽/高/压力/标志 ---
+        for (int f = 0; f < MAX_FINGERS; f++)
         {
-            int x1 = rawData[6] | (rawData[7] << 8);
-            int y1 = rawData[8] | (rawData[9] << 8);
+            int off = DATA_START + f * FINGER_SIZE;
+            if (off + FINGER_SIZE > rawData.Length) break;
 
-            if (x1 >= 100 && y1 >= 100 && x1 <= maxX * 1.15 && y1 <= maxY * 1.15)
+            int x = rawData[off]     | (rawData[off + 1] << 8);
+            int y = rawData[off + 2] | (rawData[off + 3] << 8);
+
+            if (!showAll)
             {
-                int w1 = rawData.Length > 11 ? rawData[10] : 20;
-                int h1 = rawData.Length > 12 ? rawData[11] : 20;
-                int p1 = rawData.Length > 13 ? rawData[12] : 128;
-
-                contacts.Add(new TouchpadContact
-                {
-                    X = x1, Y = y1, Width = w1, Height = h1,
-                    Pressure = p1, Confidence = true, ContactId = 0,
-                });
-                dbg.Append($" F1:({x1},{y1}) W={w1} H={h1} P={p1}");
+                // 正常模式：过滤无效触点
+                if (x < 100 || y < 100) continue;
+                if (x > maxX * 1.15 || y > maxY * 1.15) continue;
             }
-        }
 
-        // --- 触点2: bytes 14-17 (X+Y) ---
-        if (rawData.Length >= 18)
-        {
-            int x2 = rawData[14] | (rawData[15] << 8);
-            int y2 = rawData[16] | (rawData[17] << 8);
+            int w = rawData[off + 4];
+            int h = rawData[off + 5];
+            int p = rawData[off + 6];
+            int flags = rawData[off + 7];
 
-            if (x2 >= 100 && y2 >= 100 && x2 <= maxX * 1.15 && y2 <= maxY * 1.15)
+            // 在 showAll 模式也跳过四个角全零的
+            if (showAll && x == 0 && y == 0 && w == 0 && h == 0) continue;
+
+            contacts.Add(new TouchpadContact
             {
-                contacts.Add(new TouchpadContact
-                {
-                    X = x2, Y = y2, Width = 20, Height = 20,
-                    Pressure = 128, Confidence = false, ContactId = 1,
-                });
-                dbg.Append($" F2:({x2},{y2})");
-            }
+                X = x, Y = y,
+                Width = w, Height = h,
+                Pressure = p,
+                Confidence = (flags & 0x01) != 0,
+                ContactId = f,
+            });
+
+            dbg.Append($" F{f}:({x},{y}) W={w} H={h} P={p}");
         }
 
         if (contacts.Count == 0)
@@ -690,7 +695,7 @@ public partial class MainWindow : Window
             _frameCounter++;
 
             // 解析触点
-            var contacts = TouchpadHidParser.Parse(hidReport, TOUCHPAD_MAX_X, TOUCHPAD_MAX_Y, out string debug);
+            var contacts = TouchpadHidParser.Parse(hidReport, TOUCHPAD_MAX_X, TOUCHPAD_MAX_Y, out string debug, _showAllFingers);
 
             // 每 50 帧记录一次摘要 + 触点数量变化时记录
             if (_frameCounter % 50 == 0)
@@ -726,9 +731,6 @@ public partial class MainWindow : Window
     // ========================================================================
     private void ProcessContactsAndRender(List<TouchpadContact> contacts)
     {
-        // 单指模式：只保留第一个触点
-        if (!_showAllFingers && contacts.Count > 1)
-            contacts = contacts.Take(1).ToList();
         // 获取窗口尺寸
         double winW = Math.Max(TouchCanvas.ActualWidth, 100);  // 画布的实际宽度
         double winH = Math.Max(ActualHeight, 100);
@@ -778,12 +780,28 @@ public partial class MainWindow : Window
             }
         }
 
-        // 稳定性去抖参数
-        const int SHOW_THRESHOLD = 3;  // 连续出现 3 帧后显示
-        const int HIDE_THRESHOLD = -5; // 连续消失 5 帧后移除
+        // 稳定性去抖参数（多指显示模式跳过稳定性检测）
+        const int SHOW_THRESHOLD = 3;
+        const int HIDE_THRESHOLD = -5;
 
-        // 更新现有触点的稳定计数器，标记本次出现的触点
-        foreach (var id in _active.Keys.ToList())
+        if (_showAllFingers)
+        {
+            // 多指显示模式：不过滤，直接显示所有触点
+            var notSeen = _active.Keys.Where(k => !activeIds.Contains(k)).ToList();
+            foreach (var id in notSeen)
+            {
+                _active.Remove(id);
+                if (_visuals.TryGetValue(id, out var vis))
+                {
+                    TouchCanvas.Children.Remove(vis);
+                    _visuals.Remove(id);
+                }
+            }
+        }
+        else
+        {
+            // 正常模式：稳定性去抖
+            foreach (var id in _active.Keys.ToList())
         {
             if (activeIds.Contains(id))
             {
@@ -810,6 +828,7 @@ public partial class MainWindow : Window
                     }
                 }
             }
+        }
         }
 
         RenderTouches();
