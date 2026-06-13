@@ -241,7 +241,7 @@ internal static class RawInput
         var sb = new System.Text.StringBuilder();
 
         // 用 CreateFile 打开 HID 设备
-        IntPtr hDevice = CreateFile(devicePath, GENERIC_READ | GENERIC_WRITE,
+        IntPtr hDevice = CreateFile(devicePath, GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
             OPEN_EXISTING, 0, IntPtr.Zero);
 
