@@ -124,6 +124,7 @@ internal static class RawInput
 
     public const uint RIDI_DEVICENAME = 0x20000007;
     public const uint RIDI_DEVICEINFO = 0x2000000b;
+    public const uint RIDI_PREPARSEDDATA = 0x20000005;
 
     // ===== HID API (读取报告描述符) =====
     [DllImport("hid.dll", SetLastError = true)]
@@ -236,75 +237,50 @@ internal static class RawInput
     /// <summary>
     /// 读取 HID 设备报告描述符并返回可读字符串
     /// </summary>
-    public static string DumpHidReportDescriptor(string devicePath)
+        public static string DumpHidReportDescriptor(IntPtr hDevice)
     {
         var sb = new System.Text.StringBuilder();
 
-        // 用 CreateFile 打开 HID 设备
-        IntPtr hDevice = CreateFile(devicePath, GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
-            OPEN_EXISTING, 0x80 /* FILE_ATTRIBUTE_NORMAL */, IntPtr.Zero);
-
-        if (hDevice == new IntPtr(-1))
+        uint size = 0;
+        GetRawInputDeviceInfoA(hDevice, RIDI_PREPARSEDDATA, IntPtr.Zero, ref size);
+        if (size == 0)
         {
-            uint err = GetLastError();
-            sb.AppendLine($"CreateFile 失败, error={err} (0x{err:X8})");
-            // 尝试备选路径格式
-            string altPath = devicePath.Replace("\\\\?\\", "\\\\.\\");
-            if (altPath != devicePath)
-            {
-                hDevice = CreateFile(altPath, GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
-                    OPEN_EXISTING, 0x80, IntPtr.Zero);
-                if (hDevice != new IntPtr(-1))
-                    sb.AppendLine("  用备选路径成功");
-            }
-            if (hDevice == new IntPtr(-1))
-                return sb.ToString();
+            sb.AppendLine($"无法获取 preparsed data, error={GetLastError()}");
+            return sb.ToString();
         }
 
+        IntPtr pPreparsed = Marshal.AllocHGlobal((int)size);
         try
         {
-            if (!HidD_GetPreparsedData(hDevice, out IntPtr preparsed))
-            {
-                sb.AppendLine($"HidD_GetPreparsedData 失败, error={Marshal.GetLastWin32Error()}");
-                return sb.ToString();
-            }
+            GetRawInputDeviceInfoA(hDevice, RIDI_PREPARSEDDATA, pPreparsed, ref size);
+            if (size == 0) return sb.ToString();
 
-            try
-            {
-                if (HidP_GetCaps(preparsed, out var caps) >= 0)
-                    sb.AppendLine($"HID Caps: 输入报告={caps.InputReportByteLength}B");
+            if (HidP_GetCaps(pPreparsed, out var caps) >= 0)
+                sb.AppendLine($"HID Caps: 输入报告={caps.InputReportByteLength}B");
 
-                uint capsLen = 0;
-                HidP_GetValueCaps(HidP_Input, IntPtr.Zero, ref capsLen, preparsed);
-                if (capsLen > 0)
+            uint capsLen = 0;
+            HidP_GetValueCaps(HidP_Input, IntPtr.Zero, ref capsLen, pPreparsed);
+            if (capsLen > 0)
+            {
+                int cs = Marshal.SizeOf<HIDP_VALUE_CAPS>();
+                IntPtr pc = Marshal.AllocHGlobal((int)(capsLen * cs));
+                try
                 {
-                    int capsSize = Marshal.SizeOf<HIDP_VALUE_CAPS>();
-                    IntPtr pCaps = Marshal.AllocHGlobal((int)(capsLen * capsSize));
-                    try
+                    HidP_GetValueCaps(HidP_Input, pc, ref capsLen, pPreparsed);
+                    for (uint i = 0; i < capsLen; i++)
                     {
-                        HidP_GetValueCaps(HidP_Input, pCaps, ref capsLen, preparsed);
-                        for (uint i = 0; i < capsLen; i++)
-                        {
-                            var vc = Marshal.PtrToStructure<HIDP_VALUE_CAPS>(
-                                IntPtr.Add(pCaps, (int)(i * capsSize)));
-                            sb.AppendLine($"  [{i}] Page=0x{vc.UsagePage:X2}" +
-                                $" 位宽={vc.BitSize}bit 数量={vc.ReportCount}" +
-                                $" 范围=[{vc.LogicalMin},{vc.LogicalMax}]" +
-                                $" ReportID={vc.ReportID}");
-                        }
+                        var vc = Marshal.PtrToStructure<HIDP_VALUE_CAPS>(IntPtr.Add(pc, (int)(i * cs)));
+                        sb.AppendLine($"  [{i}] Page=0x{vc.UsagePage:X2}" +
+                            $" 位宽={vc.BitSize}bit 数量={vc.ReportCount}" +
+                            $" 范围=[{vc.LogicalMin},{vc.LogicalMax}]" +
+                            $" ReportID={vc.ReportID}");
                     }
-                    finally { Marshal.FreeHGlobal(pCaps); }
                 }
+                finally { Marshal.FreeHGlobal(pc); }
             }
-            finally { HidD_FreePreparsedData(preparsed); }
+            else sb.AppendLine("无 Value Caps");
         }
-        finally
-        {
-            if (hDevice != IntPtr.Zero && hDevice != new IntPtr(-1))
-                CloseHandle(hDevice);
-        }
+        finally { Marshal.FreeHGlobal(pPreparsed); }
 
         return sb.ToString();
     }
@@ -1399,7 +1375,7 @@ public partial class MainWindow : Window
                             name.Contains("Col01"))
                         {
                             DebugLog("📋 正在读取触控板 HID 报告描述符...");
-                            string dump = RawInput.DumpHidReportDescriptor(name);
+                            string dump = RawInput.DumpHidReportDescriptor(entry.hDevice);
                             foreach (var line in dump.Split('\n'))
                                 DebugLog("  " + line.TrimEnd());
                             return;
