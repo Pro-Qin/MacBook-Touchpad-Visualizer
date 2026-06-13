@@ -1,0 +1,22 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.log
+.vs/
+*.nupkg
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Reasonix
+.reasonix/
+.codegraph/
+
+# OS
+.DS_Store
+Thumbs.db

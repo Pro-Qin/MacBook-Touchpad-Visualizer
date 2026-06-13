@@ -1,0 +1,5 @@
+{
+  "configProperties": {
+    "Switch.System.Windows.Input.Stylus.EnablePointerSupport": true
+  }
+}
