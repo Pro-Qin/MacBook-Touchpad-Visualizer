@@ -331,11 +331,15 @@ internal class TouchpadHidParser
 
         dbg.Append($"RID=0x{reportId:X2} Status=0x{status:X2}");
 
-        if (!tip && !showAll)
+        if (!tip)
         {
             dbg.Append(" [无触控]");
-            debugInfo = dbg.ToString();
-            return contacts;
+            if (!showAll)
+            {
+                debugInfo = dbg.ToString();
+                return contacts;
+            }
+            // showAll 模式：即使无触控也显示槽位数据
         }
 
         for (int f = 0; f < MAX_FINGERS; f++)
@@ -358,9 +362,7 @@ internal class TouchpadHidParser
             int p = rawData[off + 6];
             int flags = rawData[off + 7];
 
-            // 在 showAll 模式也跳过四个角全零的
-            if (showAll && x == 0 && y == 0 && w == 0 && h == 0) continue;
-
+            // 全部添加，showAll 模式下显示所有 5 个槽位
             contacts.Add(new TouchpadContact
             {
                 X = x, Y = y,
@@ -763,6 +765,7 @@ public partial class MainWindow : Window
                 state.ContactHeight = c.Height * 2.0;
                 state.Pressure = c.Pressure / 255.0;
                 state.Source = $"RawInput[{i + 1}]";
+                if (_showAllFingers) state.Visible = true;
             }
             else
             {
@@ -776,6 +779,7 @@ public partial class MainWindow : Window
                     Pressure = c.Pressure / 255.0,
                     ColorIndex = _active.Count % Palette.Length,
                     Source = $"RawInput[{i + 1}]",
+                    Visible = _showAllFingers, // 槽位模式立即可见
                 };
             }
         }
@@ -1140,11 +1144,14 @@ public partial class MainWindow : Window
     private void MultiFingerBtn_Click(object sender, RoutedEventArgs e)
     {
         _showAllFingers = !_showAllFingers;
-        MultiFingerBtn.Content = _showAllFingers ? "👆 多指" : "👆 单指";
+        MultiFingerBtn.Content = _showAllFingers ? "🔍 槽位" : "🔍 正常";
         MultiFingerBtn.Foreground = _showAllFingers
-            ? new SolidColorBrush(Color.FromRgb(88, 166, 255))
+            ? new SolidColorBrush(Color.FromRgb(255, 200, 80))
             : new SolidColorBrush(Color.FromRgb(139, 148, 158));
-        DebugLog(_showAllFingers ? "👆 多指模式：显示所有触点" : "👆 单指模式：仅显示第一个触点");
+        ClearTouchState();
+        DebugLog(_showAllFingers
+            ? "🔍 槽位模式：显示全部 5 个 HID 原始槽位"
+            : "🔍 正常模式：过滤无效触点 + 去抖");
     }
 
     // ========================================================================
